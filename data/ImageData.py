@@ -76,41 +76,41 @@ class ImageData:
         return hash((date_key, self.size, self.filename))
 
 
-roots = sys.argv[2:]
-ext = sys.argv[1]
+def main(roots, ext):
+    visited_paths = set()
+    all_files = []
 
-visited_paths = set()
-all_files = []
+    for root_dir in roots:
+        all_files.extend(getFiles(root_dir, ext, visited_paths))
 
-for root_dir in roots:
-    all_files.extend(getFiles(root_dir, ext, visited_paths))
+    found_files = {}
 
-found_files = {}
+    for img in all_files:
+        if img in found_files:
+            found_files[img].append(img)
+        else:
+            found_files[img] = [img]
 
-for img in all_files:
-    if img in found_files:
-        found_files[img].append(img)
-    else:
-        found_files[img] = [img]
+    duplicates = []
+    uniques = []
 
-duplicates = []
-uniques = []
+    for img_list in found_files.values():
+        if len(img_list) > 1:
+            duplicates.extend(img_list)
+        else:
+            uniques.extend(img_list)
 
-for img_list in found_files.values():
-    if len(img_list) > 1:
-        duplicates.extend(img_list)
-    else:
-        uniques.extend(img_list)
+    print("--- Uniques ---")
+    for item in uniques:
+        exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
+        print(f"{item.path}{exif_info}")
 
-print("--- Uniques ---")
-for item in uniques:
-    exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
-    print(f"{item.path}{exif_info}")
+    print("\n--- Duplicates ---")
+    for item in duplicates:
+        exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
+        print(f"{item.path}{exif_info}")
 
-print("\n--- Duplicates ---")
-for item in duplicates:
-    exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
-    print(f"{item.path}{exif_info}")
-
-# for item in no_duplicates:
-#      print(item.path)
+if __name__ == "__main__":
+    roots = sys.argv[2:]
+    ext = sys.argv[1]
+    main(roots, ext)
