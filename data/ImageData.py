@@ -1,46 +1,55 @@
 import glob
 import os
 import sys
+import concurrent.futures
 from functools import reduce
-from multiprocessing.dummy import Pool as ThreadPool
 from PIL import Image, UnidentifiedImageError
 from PIL.ExifTags import TAGS
 
-def getFiles(root_dir, ext, visited_paths):
-    files = []
+class ProcessingCancelled(Exception):
+    pass
+
+def collect_paths(root_dir, ext, visited_paths, controller=None):
+    paths = []
     path_mask = root_dir + '/**/*.' + ext
-    print(f"Processing root: {root_dir}")
+    print(f"Scanning root: {root_dir}")
     for path in glob.iglob(path_mask, recursive=True):
+        if controller:
+            controller.check()
+            
         abs_path = os.path.abspath(path)
         if not os.path.isfile(abs_path):
             continue
         if abs_path in visited_paths:
             continue
         visited_paths.add(abs_path)
+        paths.append(abs_path)
+    return paths
+
+def process_image(abs_path, controller=None):
+    if controller:
+        controller.check()
         
-        try:
-            with Image.open(abs_path) as img:
-                exif_date = None
-                try:
-                    exif_data = img._getexif()
-                    if exif_data:
-                        for tag, value in exif_data.items():
-                            if TAGS.get(tag) == 'DateTimeOriginal':
-                                exif_date = value
-                                break
-                except Exception:
-                   pass # EXIF extraction failed, treat as None
+    try:
+        with Image.open(abs_path) as img:
+            exif_date = None
+            try:
+                exif_data = img._getexif()
+                if exif_data:
+                    for tag, value in exif_data.items():
+                        if TAGS.get(tag) == 'DateTimeOriginal':
+                            exif_date = value
+                            break
+            except Exception:
+                pass # EXIF extraction failed, treat as None
 
-                statinfo = os.stat(abs_path)
-                files.append(ImageData(abs_path, statinfo.st_mtime, statinfo.st_size, os.path.basename(abs_path), exif_date))
-        except UnidentifiedImageError:
-            # Not a valid image, skip it
-            continue
-        except Exception as e:
-            print(f"Error processing {abs_path}: {e}")
-            continue
-
-    return files
+            statinfo = os.stat(abs_path)
+            return ImageData(abs_path, statinfo.st_mtime, statinfo.st_size, os.path.basename(abs_path), exif_date)
+    except UnidentifiedImageError:
+        return None # Not a valid image
+    except Exception as e:
+        print(f"Error processing {abs_path}: {e}")
+        return None
 
 class ImageData:
     def __init__(self, path=None, date=None, size=None, filename=None, exif_date=None):
@@ -76,39 +85,67 @@ class ImageData:
         return hash((date_key, self.size, self.filename))
 
 
-def main(roots, ext):
+def main(roots, ext, progress_callback=None, controller=None):
     visited_paths = set()
-    all_files = []
-
+    all_paths = []
+    
+    # Step 1: Collect all paths (fast)
     for root_dir in roots:
-        all_files.extend(getFiles(root_dir, ext, visited_paths))
+        if controller: controller.check()
+        all_paths.extend(collect_paths(root_dir, ext, visited_paths, controller))
+
+    total_files = len(all_paths)
+    all_files = []
+    
+    # Step 2: Process images (parallel)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_image, path, controller): path for path in all_paths}
+        
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            if controller: controller.check()
+            
+            if progress_callback:
+                progress_callback(i + 1, total_files) # i is 0-indexed
+            
+            try:
+                img_data = future.result()
+                if img_data:
+                    all_files.append(img_data)
+            except Exception as exc:
+                print(f'Generated an exception: {exc}')
+            
+    if progress_callback:
+        progress_callback(total_files, total_files)
 
     found_files = {}
 
     for img in all_files:
         if img in found_files:
-            found_files[img].append(img)
+            found_files[img].add(img.path)
         else:
-            found_files[img] = [img]
+            found_files[img] = {img.path}
 
-    duplicates = []
+    duplicates = {}
     uniques = []
 
-    for img_list in found_files.values():
-        if len(img_list) > 1:
-            duplicates.extend(img_list)
+    for img_key, paths in found_files.items():
+        if len(paths) > 1:
+            duplicates[img_key] = paths
         else:
-            uniques.extend(img_list)
+            uniques.append(img_key)
 
-    print("--- Uniques ---")
-    for item in uniques:
-        exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
-        print(f"{item.path}{exif_info}")
+    print(f"--- Uniques: {len(uniques)} ---")
+    # for item in uniques:
+    #     exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
+    #     print(f"{item.path}{exif_info}")
 
     print("\n--- Duplicates ---")
-    for item in duplicates:
-        exif_info = f" [EXIF: {item.exif_date}]" if item.exif_date else " [No EXIF]"
-        print(f"{item.path}{exif_info}")
+    for img_key, paths in duplicates.items():
+        exif_info = f" [EXIF: {img_key.exif_date}]" if img_key.exif_date else " [No EXIF]"
+        print(f"Duplicate Group ({len(paths)} files): {img_key.filename} (Size: {img_key.size}){exif_info}")
+        for p in paths:
+             print(f"  {p}")
 
 if __name__ == "__main__":
     roots = sys.argv[2:]
