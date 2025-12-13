@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, messagebox
+from tkinter import filedialog, scrolledtext, messagebox, Label
+from PIL import Image, ImageTk
 import sys
 import os
 import threading
@@ -9,6 +10,21 @@ import time
 # Ensure we can import ImageData from the data directory
 sys.path.append(os.path.join(os.path.dirname(__file__), 'data'))
 import ImageData
+
+class Redirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, string):
+        try:
+            self.text_widget.insert(tk.END, string)
+            self.text_widget.see(tk.END)
+            self.text_widget.update_idletasks()
+        except Exception:
+            pass
+
+    def flush(self):
+        pass
 
 class GuiRunController:
     def __init__(self):
@@ -42,7 +58,7 @@ class DuplicateFinderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Duplicate Image Finder")
-        self.root.geometry("600x650")
+        self.root.geometry("800x650") # Increased width for 3 columns
         
         self.is_processing = False
         self.animation_step = 0
@@ -93,27 +109,45 @@ class DuplicateFinderGUI:
 
         # Animation Canvas
         self.canvas = tk.Canvas(control_frame, width=200, height=100, bg="#101010")
-        self.canvas.pack(pady=10)
+        self.canvas.pack(pady=10, fill=tk.X)
 
-        # Output Text Area
-        tk.Label(root, text="Output:").pack(anchor=tk.W, padx=10)
-        self.output_area = scrolledtext.ScrolledText(root, height=15)
-        self.output_area.pack(padx=10, pady=(0, 10), fill=tk.BOTH, expand=True)
+        # Results Pane (Split View)
+        self.paned_window = tk.PanedWindow(root, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # Redirect stdout to text widget
-        class Redirector:
-            def __init__(self, text_widget):
-                self.text_widget = text_widget
+        # Left Panel: Groups List
+        left_frame = tk.Frame(self.paned_window)
+        tk.Label(left_frame, text="Duplicate Groups:").pack(anchor=tk.W)
+        
+        self.groups_list = tk.Listbox(left_frame, width=40)
+        self.groups_list.pack(fill=tk.BOTH, expand=True)
+        self.groups_list.bind('<<ListboxSelect>>', self.on_group_select)
+        self.paned_window.add(left_frame)
 
-            def write(self, string):
-                self.text_widget.insert(tk.END, string)
-                self.text_widget.see(tk.END)
-                self.text_widget.update_idletasks() # Force update UI
+        # Middle Panel: Details
+        right_frame = tk.Frame(self.paned_window)
+        tk.Label(right_frame, text="Details:").pack(anchor=tk.W)
+        
+        self.details_text = scrolledtext.ScrolledText(right_frame, width=40, height=10)
+        self.details_text.pack(fill=tk.BOTH, expand=True)
+        self.paned_window.add(right_frame)
 
-            def flush(self):
-                pass
+        # Right Panel: Preview
+        preview_frame = tk.Frame(self.paned_window)
+        tk.Label(preview_frame, text="Preview:").pack(anchor=tk.W)
+        self.preview_label = tk.Label(preview_frame, text="No Preview", bg="#202020")
+        self.preview_label.pack(fill=tk.BOTH, expand=True)
+        self.paned_window.add(preview_frame)
 
-        self.redirector = Redirector(self.output_area)
+        # Output Log (Hidden or minimized, or just used for log messages)
+        # For now, let's keep a small log area at the bottom for status messages
+        self.log_area = scrolledtext.ScrolledText(root, height=5)
+        self.log_area.pack(padx=10, pady=(0, 10), fill=tk.X)
+
+        self.redirector = Redirector(self.log_area)
+        
+        # Store results
+        self.duplicates_data = {} # Map Index -> (ImageData, [paths])
 
     def add_folder(self):
         folder = filedialog.askdirectory()
@@ -156,6 +190,13 @@ class DuplicateFinderGUI:
         if not ext:
             messagebox.showwarning("Warning", "Please specify a file extension.")
             return
+        
+        # Clear UI
+        self.groups_list.delete(0, tk.END)
+        self.details_text.delete(1.0, tk.END)
+        self.log_area.delete(1.0, tk.END)
+        self.duplicates_data = {}
+        self.preview_label.config(image="", text="No Preview")
 
         # Reset Controller
         self.controller = GuiRunController()
@@ -175,6 +216,48 @@ class DuplicateFinderGUI:
         thread.daemon = True
         thread.start()
 
+    def on_group_select(self, event):
+        selection = self.groups_list.curselection()
+        if not selection:
+            return
+        
+        index = selection[0]
+        if index in self.duplicates_data:
+            img_data, paths = self.duplicates_data[index]
+            
+            # Show details
+            self.details_text.delete(1.0, tk.END)
+            self.details_text.insert(tk.END, f"Filename: {img_data.filename}\n")
+            self.details_text.insert(tk.END, f"Size: {img_data.size} bytes\n")
+            self.details_text.insert(tk.END, f"Date: {img_data.date}\n")
+            exif_str = str(img_data.exif_date) if img_data.exif_date else "No EXIF"
+            self.details_text.insert(tk.END, f"EXIF Date: {exif_str}\n")
+            self.details_text.insert(tk.END, "-"*40 + "\n")
+            self.details_text.insert(tk.END, f"Count: {len(paths)}\n")
+            self.details_text.insert(tk.END, "Paths:\n")
+            for p in paths:
+                self.details_text.insert(tk.END, f"  {p}\n")
+            
+            # Show Preview (First image)
+            if paths:
+                first_path = list(paths)[0]
+                self.show_preview(first_path)
+
+    def show_preview(self, path):
+        try:
+            pil_image = Image.open(path)
+            
+            # Resize
+            max_size = (300, 300)
+            pil_image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            # Convert to ImageTk
+            self.tk_image = ImageTk.PhotoImage(pil_image)
+            self.preview_label.config(image=self.tk_image, text="")
+        except Exception as e:
+            self.preview_label.config(image="", text="Preview Failed")
+            print(f"Preview error: {e}")
+
     def update_progress(self, current, total):
         if total > 0:
             percentage = (current / total) * 100
@@ -184,43 +267,56 @@ class DuplicateFinderGUI:
         if not self.is_processing:
             return
             
-        # If paused, just skip drawing but keep loop alive (or could stop/start)
         if self.controller and self.controller.is_paused():
              self.animation_id = self.root.after(100, self.animate)
              return
             
         self.canvas.delete("all")
-        w, h = 200, 100
-        cx, cy = w/2, h/2
-        self.animation_step += 0.1
+        w = self.canvas.winfo_width()
+        if w < 10: w = 200
+        h = 100
         
-        # Draw "Wild" Fractal-ish geometric pattern
-        # Concentric rotating triangles and circles
-        for i in range(5):
-            angle_offset = self.animation_step + (i * math.pi / 2.5)
-            scale = 30 + (i * 10)
-            
-            # Rotating Triangle
-            p1 = (cx + scale * math.cos(angle_offset), cy + scale * math.sin(angle_offset))
-            p2 = (cx + scale * math.cos(angle_offset + 2*math.pi/3), cy + scale * math.sin(angle_offset + 2*math.pi/3))
-            p3 = (cx + scale * math.cos(angle_offset + 4*math.pi/3), cy + scale * math.sin(angle_offset + 4*math.pi/3))
-            
-            colors = ["#ff0055", "#00ff55", "#5500ff", "#ffff00", "#00ffff"]
-            color = colors[i % len(colors)]
-            
-            self.canvas.create_polygon(p1, p2, p3, outline=color, width=2, fill="")
-            
-            # Ornament circles
-            rad = 3 + i
-            ox = cx + (scale * 0.5) * math.cos(-angle_offset * 1.5)
-            oy = cy + (scale * 0.5) * math.sin(-angle_offset * 1.5)
-            self.canvas.create_oval(ox-rad, oy-rad, ox+rad, oy+rad, fill=color)
+        self.animation_step += 0.05
+        
+        # Hallucinating Effect: Morphing blobs that fill the screen
+        # We create a mesh of colored polygons that shift over time
+        
+        cols = 8
+        rows = 4
+        cell_w = w / cols
+        cell_h = h / rows
+        
+        # Color palette: Psychedelic
+        palette = ["#FF00FF", "#00FFFF", "#FFFF00", "#FF0000", "#0000FF", "#00FF00"]
+        
+        for r in range(rows):
+            for c in range(cols):
+                # Calculate diverse phase shifts for each cell
+                cx = (c + 0.5) * cell_w
+                cy = (r + 0.5) * cell_h
+                
+                # Warping logic
+                dx = math.sin(self.animation_step + c*0.5 + r*0.3) * (cell_w * 0.8)
+                dy = math.cos(self.animation_step * 1.2 + c*0.3 + r*0.5) * (cell_h * 0.8)
+                
+                # Size oscillation
+                size = (cell_w + cell_h) * 0.4 * (1.2 + 0.5 * math.sin(self.animation_step * 2 + r*c))
+                
+                # Dynamic Color Selection
+                col_idx = int(self.animation_step * 2 + c + r) % len(palette)
+                color = palette[col_idx]
+                
+                # Draw shifting ovals/blobs that overlap significantly to cover background
+                x1 = cx + dx - size
+                y1 = cy + dy - size
+                x2 = cx + dx + size
+                y2 = cy + dy + size
+                
+                self.canvas.create_oval(x1, y1, x2, y2, fill=color, outline="", stipple="gray50") # Stipple adds a bit of texture/blending
 
-        self.animation_id = self.root.after(30, self.animate)
+        self.animation_id = self.root.after(50, self.animate)
 
     def process(self, folders, ext):
-        # Clear previous output
-        self.output_area.delete(1.0, tk.END)
         print("Starting processing...")
         
         # Redirect stdout
@@ -229,8 +325,15 @@ class DuplicateFinderGUI:
 
         try:
             # Call the logic with callback and controller
-            ImageData.main(folders, ext, progress_callback=self.update_progress, controller=self.controller)
+            # Now using find_duplicates to get data back
+            uniques, duplicates = ImageData.find_duplicates(folders, ext, progress_callback=self.update_progress, controller=self.controller)
             print("\nProcessing complete.")
+            print(f"Found {len(uniques)} unique files.")
+            print(f"Found {len(duplicates)} duplicate groups.")
+            
+            # Populate GUI on main thread
+            self.root.after(0, lambda: self.populate_results(duplicates))
+            
         except ImageData.ProcessingCancelled:
             print("\n[!] Processing Cancelled by User.")
         except Exception as e:
@@ -248,6 +351,17 @@ class DuplicateFinderGUI:
                  self.root.after(0, lambda: self.progress_label.config(text="Cancelled."))
             else:
                  self.root.after(0, lambda: self.progress_label.config(text="Done."))
+
+    def populate_results(self, duplicates_dict):
+        self.groups_list.delete(0, tk.END)
+        self.duplicates_data = {}
+        
+        idx = 0
+        for img_data, paths in duplicates_dict.items():
+            label = f"{img_data.filename} ({len(paths)} copies)"
+            self.groups_list.insert(tk.END, label)
+            self.duplicates_data[idx] = (img_data, paths)
+            idx += 1
 
 if __name__ == "__main__":
     root = tk.Tk()

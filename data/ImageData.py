@@ -85,7 +85,7 @@ class ImageData:
         return hash((date_key, self.size, self.filename))
 
 
-def main(roots, ext, progress_callback=None, controller=None):
+def find_duplicates(roots, ext, progress_callback=None, controller=None):
     visited_paths = set()
     all_paths = []
     
@@ -134,6 +134,11 @@ def main(roots, ext, progress_callback=None, controller=None):
             duplicates[img_key] = paths
         else:
             uniques.append(img_key)
+            
+    return uniques, duplicates
+
+def main(roots, ext):
+    uniques, duplicates = find_duplicates(roots, ext)
 
     print(f"--- Uniques: {len(uniques)} ---")
     # for item in uniques:
