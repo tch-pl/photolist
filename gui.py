@@ -91,7 +91,10 @@ class DuplicateFinderGUI:
 
         # Process Button
         self.process_btn = tk.Button(control_frame, text="Find Duplicates", command=self.start_processing_thread, bg="#dddddd")
-        self.process_btn.pack(pady=5)
+        self.process_btn.pack(pady=5, side=tk.LEFT, padx=5)
+
+        self.report_btn = tk.Button(control_frame, text="Generate Report", command=self.start_report_thread, bg="#dddddd")
+        self.report_btn.pack(pady=5, side=tk.LEFT, padx=5)
 
         # Control Buttons
         ctrl_frame = tk.Frame(control_frame)
@@ -351,6 +354,91 @@ class DuplicateFinderGUI:
                  self.root.after(0, lambda: self.progress_label.config(text="Cancelled."))
             else:
                  self.root.after(0, lambda: self.progress_label.config(text="Done."))
+
+    def start_report_thread(self):
+        folders = self.folder_list.get(0, tk.END)
+        if not folders:
+            messagebox.showwarning("Warning", "Please add at least one folder.")
+            return
+        
+        ext = self.ext_entry.get().strip()
+        
+        # UI Prep
+        self.report_btn.config(state=tk.DISABLED)
+        self.process_btn.config(state=tk.DISABLED)
+        self.pause_btn.config(state=tk.NORMAL, text="Pause")
+        self.cancel_btn.config(state=tk.NORMAL)
+        self.is_processing = True
+        self.progress_label.config(text="Generating Report...")
+        
+        self.controller = GuiRunController()
+        self.animate()
+        
+        thread = threading.Thread(target=self.run_report, args=(list(folders), ext))
+        thread.daemon = True
+        thread.start()
+
+    def run_report(self, folders, ext):
+        # Redirect stdout
+        old_stdout = sys.stdout
+        sys.stdout = self.redirector
+        
+        try:
+             report = ImageData.analyze_dataset(folders, ext, progress_callback=self.update_progress, controller=self.controller)
+             self.root.after(0, lambda: self.show_report_window(report))
+        except ImageData.ProcessingCancelled:
+             print("\nReport Cancelled.")
+        except Exception as e:
+             print(f"\nReport Error: {e}")
+        finally:
+            sys.stdout = old_stdout
+            self.is_processing = False
+            self.root.after(0, lambda: self.report_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.process_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.pause_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.cancel_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.progress_label.config(text="Report Ready." if not self.controller.cancelled.is_set() else "Cancelled."))
+
+    def show_report_window(self, report):
+        top = tk.Toplevel(self.root)
+        top.title("Dataset Analysis Report")
+        top.geometry("600x500")
+        
+        txt = scrolledtext.ScrolledText(top, width=70, height=25)
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Format Report
+        lines = []
+        lines.append("=== DATASET ANALYSIS REPORT ===")
+        lines.append(f"Total Files Found: {report['total_files']}")
+        lines.append(f"Distinct Content Items: {report['distinct_items']}")
+        
+        def sizeof_fmt(num):
+            for unit in ["B", "KB", "MB", "GB", "TB"]:
+                if abs(num) < 1024.0:
+                    return f"{num:3.1f} {unit}"
+                num /= 1024.0
+            return f"{num:.1f} PB"
+
+        lines.append(f"Total Size on Disk: {sizeof_fmt(report['total_size'])}")
+        lines.append(f"Unique Content Size: {sizeof_fmt(report['unique_size'])}")
+        
+        savings = report['total_size'] - report['unique_size']
+        lines.append(f"Potential Savings: {sizeof_fmt(savings)}")
+        lines.append("-" * 40)
+        
+        lines.append(f"\n=== FILENAME CLASHES ({len(report['clashes'])}) ===")
+        if not report['clashes']:
+            lines.append("No clashes found. All filenames represent unique content.")
+        else:
+            for fname, versions in report['clashes'].items():
+                lines.append(f"\nFilename: '{fname}' used for {len(versions)} different contents:")
+                for img in versions:
+                    exif = str(img.exif_date) if img.exif_date else "No EXIF"
+                    lines.append(f"  - Size: {img.size} bytes | Date: {img.date} | {exif}")
+
+        txt.insert(tk.END, "\n".join(lines))
+        txt.config(state=tk.DISABLED) # Read only
 
     def populate_results(self, duplicates_dict):
         self.groups_list.delete(0, tk.END)

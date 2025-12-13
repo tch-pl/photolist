@@ -6,6 +6,9 @@ from functools import reduce
 from PIL import Image, UnidentifiedImageError
 from PIL.ExifTags import TAGS
 
+# Disable DecompressionBombWarning
+Image.MAX_IMAGE_PIXELS = None
+
 class ProcessingCancelled(Exception):
     pass
 
@@ -136,6 +139,73 @@ def find_duplicates(roots, ext, progress_callback=None, controller=None):
             uniques.append(img_key)
             
     return uniques, duplicates
+
+
+def analyze_dataset(roots, ext, progress_callback=None, controller=None):
+    """
+    Analyzes the dataset for distinct items, stats, and name clashes.
+    Returns a dictionary with the report data.
+    """
+    # Reuse find_duplicates to get the raw data
+    uniques, duplicates = find_duplicates(roots, ext, progress_callback, controller)
+    
+    # helper to check controller
+    def check_cancel():
+        if controller and controller.cancelled.is_set():
+            raise ProcessingCancelled("User cancelled processing")
+
+    check_cancel()
+    
+    all_content = []
+    
+    # Unpack uniques
+    for img in uniques:
+        all_content.append((img, {img.path}))
+        
+    # Unpack duplicates
+    for img, paths in duplicates.items():
+        all_content.append((img, paths))
+        
+    check_cancel()
+        
+    # Stats
+    total_files = 0
+    total_bytes_on_disk = 0
+    unique_bytes = 0
+    distinct_count = len(all_content)
+    
+    # For Clash Detection: Map filename -> list of ImageData
+    filename_map = {}
+    
+    for img, paths in all_content:
+        # Update Stats
+        count = len(paths)
+        total_files += count
+        total_bytes_on_disk += (img.size * count)
+        unique_bytes += img.size
+        
+        # Clash Map
+        if img.filename not in filename_map:
+            filename_map[img.filename] = []
+        filename_map[img.filename].append(img)
+
+    check_cancel()
+
+    # Identify Clashes (same filename, multiple distinct contents)
+    clashes = {}
+    for fname, distinct_versions in filename_map.items():
+        if len(distinct_versions) > 1:
+            clashes[fname] = distinct_versions
+
+    report = {
+        "total_files": total_files,
+        "distinct_items": distinct_count,
+        "total_size": total_bytes_on_disk,
+        "unique_size": unique_bytes,
+        "clashes": clashes
+    }
+    
+    return report
 
 def main(roots, ext):
     uniques, duplicates = find_duplicates(roots, ext)
