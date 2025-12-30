@@ -9,7 +9,8 @@ import time
 
 # Ensure we can import ImageData from the data directory
 sys.path.append(os.path.join(os.path.dirname(__file__), 'data'))
-import ImageData
+import data.ImageData as ImageData
+from data.storage import ScanResultStorage
 
 class Redirector:
     def __init__(self, text_widget):
@@ -64,6 +65,7 @@ class DuplicateFinderGUI:
         self.animation_step = 0
         self.animation_id = None
         self.controller = None
+        self.loaded_from_storage = False
 
         # Top Frame for controls
         control_frame = tk.Frame(root)
@@ -96,6 +98,14 @@ class DuplicateFinderGUI:
         self.report_btn = tk.Button(control_frame, text="Generate Report", command=self.start_report_thread, bg="#dddddd")
         self.report_btn.pack(pady=5, side=tk.LEFT, padx=5)
 
+        # Storage Buttons
+        #antigravity add file path choice for this button
+        self.save_btn = tk.Button(control_frame, text="Save Results", command=self.save_results_to_storage, bg="#dddddd")
+        self.save_btn.pack(pady=5, side=tk.LEFT, padx=5)
+        
+        self.load_btn = tk.Button(control_frame, text="Load Results", command=self.load_results_from_storage, bg="#dddddd")
+        self.load_btn.pack(pady=5, side=tk.LEFT, padx=5)
+
         # Control Buttons
         ctrl_frame = tk.Frame(control_frame)
         ctrl_frame.pack(pady=2)
@@ -109,6 +119,10 @@ class DuplicateFinderGUI:
         # Progress Info
         self.progress_label = tk.Label(control_frame, text="Ready", font=("Arial", 10))
         self.progress_label.pack(pady=2)
+        
+        # Storage Status
+        self.storage_status_label = tk.Label(control_frame, text="", font=("Arial", 9), fg="#666666")
+        self.storage_status_label.pack(pady=2)
 
         # Animation Canvas
         self.canvas = tk.Canvas(control_frame, width=200, height=100, bg="#101010")
@@ -151,6 +165,9 @@ class DuplicateFinderGUI:
         
         # Store results
         self.duplicates_data = {} # Map Index -> (ImageData, [paths])
+        
+        # Auto-load previous results on startup
+        self.auto_load_on_startup()
 
     def add_folder(self):
         folder = filedialog.askdirectory()
@@ -215,6 +232,7 @@ class DuplicateFinderGUI:
         self.animate()
 
         # Start Thread
+        # anyigravity process more than one folder in a multiple threads
         thread = threading.Thread(target=self.process, args=(list(folders), ext))
         thread.daemon = True
         thread.start()
@@ -265,6 +283,14 @@ class DuplicateFinderGUI:
         if total > 0:
             percentage = (current / total) * 100
             self.root.after(0, lambda: self.progress_label.config(text=f"Processed: {current}/{total} ({percentage:.1f}%)"))
+    
+    def format_size(self, size_bytes):
+        """Format byte size to human-readable format."""
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if abs(size_bytes) < 1024.0:
+                return f"{size_bytes:3.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} PB"
 
     def animate(self):
         if not self.is_processing:
@@ -319,6 +345,9 @@ class DuplicateFinderGUI:
 
         self.animation_id = self.root.after(50, self.animate)
 
+    #antigravity method should be processing just one folder, to process more than one folder call this method for each folder separately
+    # move GUI handling outside
+    # populate asynchronous GUI on main thread
     def process(self, folders, ext):
         print("Starting processing...")
         
@@ -333,6 +362,12 @@ class DuplicateFinderGUI:
             print("\nProcessing complete.")
             print(f"Found {len(uniques)} unique files.")
             print(f"Found {len(duplicates)} duplicate groups.")
+            
+            # Calculate distinct file size
+            distinct_size, total_files, distinct_files = ImageData.calculate_distinct_size(uniques, duplicates)
+            print(f"\nTotal files scanned: {total_files}")
+            print(f"Distinct files (unique content): {distinct_files}")
+            print(f"Distinct files total size: {self.format_size(distinct_size)}")
             
             # Populate GUI on main thread
             self.root.after(0, lambda: self.populate_results(duplicates))
@@ -450,6 +485,79 @@ class DuplicateFinderGUI:
             self.groups_list.insert(tk.END, label)
             self.duplicates_data[idx] = (img_data, paths)
             idx += 1
+    
+    def save_results_to_storage(self):
+        """Save current scan results to storage."""
+        if not self.duplicates_data:
+            messagebox.showinfo("Info", "No results to save. Please run a scan first.")
+            return
+        
+        try:
+            # Convert duplicates_data back to the format expected by storage
+            duplicates = {}
+            for idx, (img_data, paths) in self.duplicates_data.items():
+                duplicates[img_data] = paths
+            
+            # For now, we don't track uniques in the GUI, so pass empty list
+            # In a full implementation, you might want to store uniques too
+            success = ScanResultStorage.save_results([], duplicates)
+            
+            if success:
+                self.storage_status_label.config(text="✓ Results saved to storage", fg="#00AA00")
+                messagebox.showinfo("Success", "Scan results saved successfully!")
+            else:
+                self.storage_status_label.config(text="✗ Failed to save results", fg="#AA0000")
+                messagebox.showerror("Error", "Failed to save results to storage.")
+        except Exception as e:
+            self.storage_status_label.config(text="✗ Save error", fg="#AA0000")
+            messagebox.showerror("Error", f"Error saving results: {e}")
+    
+    def load_results_from_storage(self):
+        """Load scan results from storage."""
+        if not ScanResultStorage.storage_exists():
+            messagebox.showinfo("Info", "No saved results found.")
+            return
+        
+        try:
+            uniques, duplicates = ScanResultStorage.load_results()
+            
+            if not duplicates:
+                messagebox.showinfo("Info", "No duplicate results found in storage.")
+                self.storage_status_label.config(text="Storage empty", fg="#666666")
+                return
+            
+            # Clear current results
+            self.groups_list.delete(0, tk.END)
+            self.details_text.delete(1.0, tk.END)
+            self.log_area.delete(1.0, tk.END)
+            self.preview_label.config(image="", text="No Preview")
+            
+            # Populate with loaded data
+            self.populate_results(duplicates)
+            self.loaded_from_storage = True
+            
+            self.storage_status_label.config(text=f"✓ Loaded {len(duplicates)} duplicate groups from storage", fg="#0066CC")
+            self.log_area.insert(tk.END, f"Loaded {len(duplicates)} duplicate groups from storage.\n")
+            messagebox.showinfo("Success", f"Loaded {len(duplicates)} duplicate groups from storage.")
+            
+        except Exception as e:
+            self.storage_status_label.config(text="✗ Load error", fg="#AA0000")
+            messagebox.showerror("Error", f"Error loading results: {e}")
+    
+    def auto_load_on_startup(self):
+        """Automatically load previous results on application startup."""
+        if ScanResultStorage.storage_exists():
+            try:
+                uniques, duplicates = ScanResultStorage.load_results()
+                
+                if duplicates:
+                    self.populate_results(duplicates)
+                    self.loaded_from_storage = True
+                    self.storage_status_label.config(text=f"✓ Auto-loaded {len(duplicates)} groups from previous scan", fg="#0066CC")
+                    self.log_area.insert(tk.END, f"Auto-loaded {len(duplicates)} duplicate groups from previous scan.\n")
+            except Exception as e:
+                print(f"Failed to auto-load results: {e}")
+                self.storage_status_label.config(text="Previous results could not be loaded", fg="#AA6600")
 
 if __name__ == "__main__":
     root = tk.Tk()

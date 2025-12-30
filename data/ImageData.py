@@ -53,7 +53,7 @@ def process_image(abs_path, controller=None):
     except Exception as e:
         print(f"Error processing {abs_path}: {e}")
         return None
-
+# antigravity create subclass that keep field with checksum value, do calculate checksum based on file content in that class
 class ImageData:
     def __init__(self, path=None, date=None, size=None, filename=None, exif_date=None):
         self.path = path
@@ -139,6 +139,37 @@ def find_duplicates(roots, ext, progress_callback=None, controller=None):
             uniques.append(img_key)
             
     return uniques, duplicates
+
+
+def calculate_distinct_size(uniques, duplicates):
+    """
+    Calculate the total size of distinct files (unique content only).
+    
+    Args:
+        uniques: List of unique ImageData objects
+        duplicates: Dict mapping ImageData to set of file paths
+        
+    Returns:
+        Tuple of (distinct_size_bytes, total_files_count, distinct_files_count)
+    """
+    distinct_size = 0
+    distinct_count = 0
+    total_count = 0
+    
+    # Add size from unique files (each appears once)
+    for img in uniques:
+        distinct_size += img.size
+        distinct_count += 1
+        total_count += 1
+    
+    # Add size from duplicates (count each distinct content once, but track all files)
+    for img_data, paths in duplicates.items():
+        distinct_size += img_data.size  # Count the content only once
+        distinct_count += 1
+        total_count += len(paths)  # But count all file instances
+    
+    return distinct_size, total_count, distinct_count
+
 
 
 def analyze_dataset(roots, ext, progress_callback=None, controller=None):
