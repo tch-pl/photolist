@@ -12,24 +12,43 @@ class ScanResultStorage:
     @staticmethod
     def _serialize_image_data(img_data):
         """Convert ImageData object to dictionary for JSON serialization."""
-        return {
+        data = {
             'path': img_data.path,
             'date': img_data.date,
             'size': img_data.size,
             'filename': img_data.filename,
             'exif_date': img_data.exif_date
         }
+        
+        # Include checksum if available (for ChecksumImageData)
+        if hasattr(img_data, '_checksum') and img_data._checksum is not None:
+            data['checksum'] = img_data._checksum
+        
+        return data
     
     @staticmethod
     def _deserialize_image_data(data_dict):
-        """Create ImageData object from dictionary."""
-        return ImgData.ImageData(
-            path=data_dict.get('path'),
-            date=data_dict.get('date'),
-            size=data_dict.get('size'),
-            filename=data_dict.get('filename'),
-            exif_date=data_dict.get('exif_date')
-        )
+        """Create ImageData or ChecksumImageData object from dictionary."""
+        # Check if this is checksum-based data
+        if 'checksum' in data_dict and data_dict['checksum'] is not None:
+            from .ChecksumImageData import ChecksumImageData
+            return ChecksumImageData(
+                path=data_dict.get('path'),
+                date=data_dict.get('date'),
+                size=data_dict.get('size'),
+                filename=data_dict.get('filename'),
+                exif_date=data_dict.get('exif_date'),
+                checksum=data_dict.get('checksum')
+            )
+        else:
+            # Legacy format or metadata-based
+            return ImgData.ImageData(
+                path=data_dict.get('path'),
+                date=data_dict.get('date'),
+                size=data_dict.get('size'),
+                filename=data_dict.get('filename'),
+                exif_date=data_dict.get('exif_date')
+            )
     
     @staticmethod
     def save_results(uniques: List, duplicates: Dict, filepath: str = None) -> bool:

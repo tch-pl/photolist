@@ -29,7 +29,18 @@ def collect_paths(root_dir, ext, visited_paths, controller=None):
         paths.append(abs_path)
     return paths
 
-def process_image(abs_path, controller=None):
+def process_image(abs_path, controller=None, use_checksum=False):
+    """
+    Process an image file and create ImageData or ChecksumImageData object.
+    
+    Args:
+        abs_path: Absolute path to the image file
+        controller: Optional GuiRunController for pause/cancel support
+        use_checksum: If True, create ChecksumImageData with content hash
+        
+    Returns:
+        ImageData or ChecksumImageData object, or None if processing fails
+    """
     if controller:
         controller.check()
         
@@ -47,13 +58,21 @@ def process_image(abs_path, controller=None):
                 pass # EXIF extraction failed, treat as None
 
             statinfo = os.stat(abs_path)
-            return ImageData(abs_path, statinfo.st_mtime, statinfo.st_size, os.path.basename(abs_path), exif_date)
+            
+            if use_checksum:
+                # Import here to avoid circular dependency
+                from .ChecksumImageData import ChecksumImageData
+                return ChecksumImageData(abs_path, statinfo.st_mtime, statinfo.st_size, 
+                                        os.path.basename(abs_path), exif_date)
+            else:
+                return ImageData(abs_path, statinfo.st_mtime, statinfo.st_size, 
+                               os.path.basename(abs_path), exif_date)
     except UnidentifiedImageError:
         return None # Not a valid image
     except Exception as e:
         print(f"Error processing {abs_path}: {e}")
         return None
-# antigravity create subclass that keep field with checksum value, do calculate checksum based on file content in that class
+# ChecksumImageData subclass is imported inside process_image to avoid circular imports
 class ImageData:
     def __init__(self, path=None, date=None, size=None, filename=None, exif_date=None):
         self.path = path
@@ -88,7 +107,20 @@ class ImageData:
         return hash((date_key, self.size, self.filename))
 
 
-def find_duplicates(roots, ext, progress_callback=None, controller=None):
+def find_duplicates(roots, ext, progress_callback=None, controller=None, use_checksum=False):
+    """
+    Find duplicate images across multiple root directories.
+    
+    Args:
+        roots: List of root directories to scan
+        ext: File extension to search for (e.g., 'jpg')
+        progress_callback: Optional callback function(current, total) for progress updates
+        controller: Optional GuiRunController for pause/cancel support
+        use_checksum: If True, use content-based checksum comparison (slower but more accurate)
+        
+    Returns:
+        Tuple of (uniques_list, duplicates_dict)
+    """
     visited_paths = set()
     all_paths = []
     
@@ -100,10 +132,13 @@ def find_duplicates(roots, ext, progress_callback=None, controller=None):
     total_files = len(all_paths)
     all_files = []
     
+    mode_str = "checksum-based" if use_checksum else "metadata-based"
+    print(f"Using {mode_str} duplicate detection")
+    
     # Step 2: Process images (parallel)
     with concurrent.futures.ThreadPoolExecutor() as executor:
         # Submit all tasks
-        futures = {executor.submit(process_image, path, controller): path for path in all_paths}
+        futures = {executor.submit(process_image, path, controller, use_checksum): path for path in all_paths}
         
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             if controller: controller.check()
@@ -172,13 +207,22 @@ def calculate_distinct_size(uniques, duplicates):
 
 
 
-def analyze_dataset(roots, ext, progress_callback=None, controller=None):
+def analyze_dataset(roots, ext, progress_callback=None, controller=None, use_checksum=False):
     """
     Analyzes the dataset for distinct items, stats, and name clashes.
-    Returns a dictionary with the report data.
+    
+    Args:
+        roots: List of root directories to scan
+        ext: File extension to search for
+        progress_callback: Optional callback for progress updates
+        controller: Optional GuiRunController for pause/cancel support
+        use_checksum: If True, use content-based checksum comparison
+        
+    Returns:
+        Dictionary with the report data.
     """
     # Reuse find_duplicates to get the raw data
-    uniques, duplicates = find_duplicates(roots, ext, progress_callback, controller)
+    uniques, duplicates = find_duplicates(roots, ext, progress_callback, controller, use_checksum)
     
     # helper to check controller
     def check_cancel():

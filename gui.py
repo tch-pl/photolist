@@ -1,8 +1,9 @@
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, messagebox, Label
+from tkinter import filedialog, scrolledtext, messagebox, Label, ttk
 from PIL import Image, ImageTk
 import sys
 import os
+import concurrent.futures
 import threading
 import math
 import time
@@ -66,15 +67,30 @@ class DuplicateFinderGUI:
         self.animation_id = None
         self.controller = None
         self.loaded_from_storage = False
+        self.use_checksum = False  # Checksum mode toggle
 
         # Top Frame for controls
         control_frame = tk.Frame(root)
         control_frame.pack(pady=10, padx=10, fill=tk.X)
 
-        # Folder List
+        # Folder List (Treeview)
         tk.Label(control_frame, text="Selected Folders:").pack(anchor=tk.W)
-        self.folder_list = tk.Listbox(control_frame, height=6)
-        self.folder_list.pack(fill=tk.X, pady=5)
+        
+        # Frame for Treeview and Scrollbar
+        list_frame = tk.Frame(control_frame)
+        list_frame.pack(fill=tk.X, pady=5)
+        
+        self.folder_tree = ttk.Treeview(list_frame, columns=("Folder", "Status"), show="headings", height=6)
+        self.folder_tree.heading("Folder", text="Folder Path")
+        self.folder_tree.heading("Status", text="Status")
+        self.folder_tree.column("Folder", width=400)
+        self.folder_tree.column("Status", width=150)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.folder_tree.yview)
+        self.folder_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.folder_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Buttons for folders
         btn_frame = tk.Frame(control_frame)
@@ -90,6 +106,16 @@ class DuplicateFinderGUI:
         self.ext_entry = tk.Entry(ext_frame, width=10)
         self.ext_entry.insert(0, "jpg")
         self.ext_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Checksum Mode Toggle
+        self.checksum_var = tk.BooleanVar(value=False)
+        checksum_cb = tk.Checkbutton(
+            ext_frame, 
+            text="Use Checksum (slower, more accurate)",
+            variable=self.checksum_var,
+            command=self.toggle_checksum_mode
+        )
+        checksum_cb.pack(side=tk.LEFT, padx=15)
 
         # Process Button
         self.process_btn = tk.Button(control_frame, text="Find Duplicates", command=self.start_processing_thread, bg="#dddddd")
@@ -99,7 +125,6 @@ class DuplicateFinderGUI:
         self.report_btn.pack(pady=5, side=tk.LEFT, padx=5)
 
         # Storage Buttons
-        #antigravity add file path choice for this button
         self.save_btn = tk.Button(control_frame, text="Save Results", command=self.save_results_to_storage, bg="#dddddd")
         self.save_btn.pack(pady=5, side=tk.LEFT, padx=5)
         
@@ -167,19 +192,27 @@ class DuplicateFinderGUI:
         self.duplicates_data = {} # Map Index -> (ImageData, [paths])
         
         # Auto-load previous results on startup
-        self.auto_load_on_startup()
+       # self.auto_load_on_startup()
 
     def add_folder(self):
         folder = filedialog.askdirectory()
         if folder:
             # Check if already added
-            if folder not in self.folder_list.get(0, tk.END):
-                self.folder_list.insert(tk.END, folder)
+            existing = [self.folder_tree.item(item)['values'][0] for item in self.folder_tree.get_children()]
+            if folder not in existing:
+                self.folder_tree.insert("", tk.END, values=(folder, "Pending"))
 
     def remove_folder(self):
-        selection = self.folder_list.curselection()
+        selection = self.folder_tree.selection()
         if selection:
-            self.folder_list.delete(selection[0])
+            for item in selection:
+                self.folder_tree.delete(item)
+    
+    def toggle_checksum_mode(self):
+        """Toggle checksum-based detection mode."""
+        self.use_checksum = self.checksum_var.get()
+        mode_str = "checksum-based" if self.use_checksum else "metadata-based"
+        print(f"Detection mode: {mode_str}")
 
     def toggle_pause(self):
         if not self.controller: return
@@ -201,7 +234,7 @@ class DuplicateFinderGUI:
             self.pause_btn.config(state=tk.DISABLED)
 
     def start_processing_thread(self):
-        folders = self.folder_list.get(0, tk.END)
+        folders = [self.folder_tree.item(item)['values'][0] for item in self.folder_tree.get_children()]
         if not folders:
             messagebox.showwarning("Warning", "Please add at least one folder.")
             return
@@ -232,8 +265,7 @@ class DuplicateFinderGUI:
         self.animate()
 
         # Start Thread
-        # anyigravity process more than one folder in a multiple threads
-        thread = threading.Thread(target=self.process, args=(list(folders), ext))
+        thread = threading.Thread(target=self.process_folders, args=(list(folders), ext))
         thread.daemon = True
         thread.start()
 
@@ -345,10 +377,25 @@ class DuplicateFinderGUI:
 
         self.animation_id = self.root.after(50, self.animate)
 
-    #antigravity method should be processing just one folder, to process more than one folder call this method for each folder separately
-    # move GUI handling outside
-    # populate asynchronous GUI on main thread
-    def process(self, folders, ext):
+    def process_single_folder(self, folder, ext):
+        """
+        Process a single folder for duplicates.
+        Returns (uniques, duplicates) tuple.
+        """
+        print(f"Processing folder: {folder}")
+        return ImageData.find_duplicates(
+            [folder], 
+            ext, 
+            progress_callback=self.update_progress, 
+            controller=self.controller,
+            use_checksum=self.use_checksum
+        )
+    
+    def process_folders(self, folders, ext):
+        """
+        Process multiple folders for duplicates in parallel.
+        This method processes folders concurrently and aggregates results.
+        """
         print("Starting processing...")
         
         # Redirect stdout
@@ -356,31 +403,122 @@ class DuplicateFinderGUI:
         sys.stdout = self.redirector
 
         try:
-            # Call the logic with callback and controller
-            # Now using find_duplicates to get data back
-            uniques, duplicates = ImageData.find_duplicates(folders, ext, progress_callback=self.update_progress, controller=self.controller)
+            all_uniques = []
+            all_duplicates = {}
+            
+            total_folders = len(folders)
+            max_workers = total_folders if total_folders > 0 else 1
+            print(f"Parallelizing with {max_workers} folder worker threads.")
+            
+            # Initialize status in Treeview
+            folder_item_map = {} # Map folder path -> tree item ID
+            for item in self.folder_tree.get_children():
+                folder_path = self.folder_tree.item(item)['values'][0]
+                if folder_path in folders:
+                    folder_item_map[folder_path] = item
+                    self.folder_tree.set(item, "Status", "Waiting...")
+            
+            # Simple thread-safe counter for progress
+            completed_count = 0
+            lock = threading.Lock()
+            
+            def folder_task_done_callback(future):
+                nonlocal completed_count
+                with lock:
+                    completed_count += 1
+                    count = completed_count 
+                self.root.after(0, lambda: self.progress_label.config(text=f"Processed folders: {count}/{total_folders}"))
+
+            # Callback factory for per-folder progress
+            def make_progress_callback(folder_path):
+                tree_item = folder_item_map.get(folder_path)
+                if not tree_item:
+                    return None
+                    
+                def callback(current, total):
+                    # Update Treeview in main thread
+                    # We use percentage to be concise
+                    status_text = f"Scanning {current}/{total}"
+                    self.root.after(0, lambda: self.folder_tree.set(tree_item, "Status", status_text))
+                return callback
+
+            # Process folders in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Update status
+                self.root.after(0, lambda: self.progress_label.config(text=f"Processing {total_folders} folders in parallel..."))
+                
+                # Submit all tasks
+                future_to_folder = {}
+                for folder in folders:
+                    # Set initial status
+                    if folder in folder_item_map:
+                        self.root.after(0, lambda f=folder: self.folder_tree.set(folder_item_map[f], "Status", "Starting..."))
+                    
+                    future = executor.submit(
+                        ImageData.find_duplicates, 
+                        [folder], 
+                        ext, 
+                        progress_callback=make_progress_callback(folder), 
+                        controller=self.controller,
+                        use_checksum=self.use_checksum
+                    )
+                    future_to_folder[future] = folder
+                
+                # Check for cancellation periodically while waiting
+                # We can't easily wait with timeout in a loop without blocking checking cancel
+                # So we just iterate get results.
+                
+                for future in concurrent.futures.as_completed(future_to_folder):
+                    if self.controller and self.controller.cancelled.is_set():
+                        break
+                        
+                    folder = future_to_folder[future]
+                    try:
+                        folder_uniques, folder_duplicates = future.result()
+                        
+                        # Aggregate results (main thread safe here as we are in the orchestrator loop)
+                        all_uniques.extend(folder_uniques)
+                        
+                        for img_data, paths in folder_duplicates.items():
+                            if img_data in all_duplicates:
+                                all_duplicates[img_data].update(paths)
+                            else:
+                                all_duplicates[img_data] = paths.copy()
+                                
+                        folder_task_done_callback(future)
+                        if folder in folder_item_map:
+                             self.root.after(0, lambda f=folder: self.folder_tree.set(folder_item_map[f], "Status", "Done"))
+                        
+                    except Exception as exc:
+                        print(f"Folder {folder} generated an exception: {exc}")
+
+            if self.controller and self.controller.cancelled.is_set():
+                raise ImageData.ProcessingCancelled("User cancelled processing")
+
             print("\nProcessing complete.")
-            print(f"Found {len(uniques)} unique files.")
-            print(f"Found {len(duplicates)} duplicate groups.")
+            print(f"Found {len(all_uniques)} unique files.")
+            print(f"Found {len(all_duplicates)} duplicate groups.")
             
             # Calculate distinct file size
-            distinct_size, total_files, distinct_files = ImageData.calculate_distinct_size(uniques, duplicates)
+            distinct_size, total_files, distinct_files = ImageData.calculate_distinct_size(all_uniques, all_duplicates)
             print(f"\nTotal files scanned: {total_files}")
             print(f"Distinct files (unique content): {distinct_files}")
             print(f"Distinct files total size: {self.format_size(distinct_size)}")
             
             # Populate GUI on main thread
-            self.root.after(0, lambda: self.populate_results(duplicates))
+            self.root.after(0, lambda: self.populate_results(all_duplicates))
             
         except ImageData.ProcessingCancelled:
             print("\n[!] Processing Cancelled by User.")
         except Exception as e:
             print(f"\nError: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             # Restore stdout
             sys.stdout = old_stdout
             
-            # Reset UI state (must be done on main thread ideally, but typically ok in simple tk)
+            # Reset UI state on main thread
             self.is_processing = False
             self.root.after(0, lambda: self.process_btn.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.pause_btn.config(state=tk.DISABLED))
@@ -391,7 +529,7 @@ class DuplicateFinderGUI:
                  self.root.after(0, lambda: self.progress_label.config(text="Done."))
 
     def start_report_thread(self):
-        folders = self.folder_list.get(0, tk.END)
+        folders = [self.folder_tree.item(item)['values'][0] for item in self.folder_tree.get_children()]
         if not folders:
             messagebox.showwarning("Warning", "Please add at least one folder.")
             return
@@ -419,7 +557,7 @@ class DuplicateFinderGUI:
         sys.stdout = self.redirector
         
         try:
-             report = ImageData.analyze_dataset(folders, ext, progress_callback=self.update_progress, controller=self.controller)
+             report = ImageData.analyze_dataset(folders, ext, progress_callback=self.update_progress, controller=self.controller, use_checksum=self.use_checksum)
              self.root.after(0, lambda: self.show_report_window(report))
         except ImageData.ProcessingCancelled:
              print("\nReport Cancelled.")
@@ -487,9 +625,21 @@ class DuplicateFinderGUI:
             idx += 1
     
     def save_results_to_storage(self):
-        """Save current scan results to storage."""
+        """Save current scan results to storage with file path selection."""
         if not self.duplicates_data:
             messagebox.showinfo("Info", "No results to save. Please run a scan first.")
+            return
+        
+        # Ask user for save location
+        filepath = filedialog.asksaveasfilename(
+            title="Save Scan Results",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile="scan_results.json"
+        )
+        
+        # User cancelled
+        if not filepath:
             return
         
         try:
@@ -500,11 +650,11 @@ class DuplicateFinderGUI:
             
             # For now, we don't track uniques in the GUI, so pass empty list
             # In a full implementation, you might want to store uniques too
-            success = ScanResultStorage.save_results([], duplicates)
+            success = ScanResultStorage.save_results([], duplicates, filepath)
             
             if success:
-                self.storage_status_label.config(text="✓ Results saved to storage", fg="#00AA00")
-                messagebox.showinfo("Success", "Scan results saved successfully!")
+                self.storage_status_label.config(text=f"✓ Results saved to {os.path.basename(filepath)}", fg="#00AA00")
+                messagebox.showinfo("Success", f"Scan results saved to:\n{filepath}")
             else:
                 self.storage_status_label.config(text="✗ Failed to save results", fg="#AA0000")
                 messagebox.showerror("Error", "Failed to save results to storage.")
@@ -513,17 +663,29 @@ class DuplicateFinderGUI:
             messagebox.showerror("Error", f"Error saving results: {e}")
     
     def load_results_from_storage(self):
-        """Load scan results from storage."""
-        if not ScanResultStorage.storage_exists():
-            messagebox.showinfo("Info", "No saved results found.")
+        """Load scan results from storage with file path selection."""
+        # Ask user for file location
+        filepath = filedialog.askopenfilename(
+            title="Load Scan Results",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile="scan_results.json"
+        )
+        
+        # User cancelled
+        if not filepath:
+            return
+        
+        if not os.path.exists(filepath):
+            messagebox.showinfo("Info", "Selected file does not exist.")
             return
         
         try:
-            uniques, duplicates = ScanResultStorage.load_results()
+            uniques, duplicates = ScanResultStorage.load_results(filepath)
             
             if not duplicates:
-                messagebox.showinfo("Info", "No duplicate results found in storage.")
-                self.storage_status_label.config(text="Storage empty", fg="#666666")
+                messagebox.showinfo("Info", "No duplicate results found in file.")
+                self.storage_status_label.config(text="File empty", fg="#666666")
                 return
             
             # Clear current results
@@ -536,9 +698,9 @@ class DuplicateFinderGUI:
             self.populate_results(duplicates)
             self.loaded_from_storage = True
             
-            self.storage_status_label.config(text=f"✓ Loaded {len(duplicates)} duplicate groups from storage", fg="#0066CC")
-            self.log_area.insert(tk.END, f"Loaded {len(duplicates)} duplicate groups from storage.\n")
-            messagebox.showinfo("Success", f"Loaded {len(duplicates)} duplicate groups from storage.")
+            self.storage_status_label.config(text=f"✓ Loaded {len(duplicates)} groups from {os.path.basename(filepath)}", fg="#0066CC")
+            self.log_area.insert(tk.END, f"Loaded {len(duplicates)} duplicate groups from {filepath}.\n")
+            messagebox.showinfo("Success", f"Loaded {len(duplicates)} duplicate groups from file.")
             
         except Exception as e:
             self.storage_status_label.config(text="✗ Load error", fg="#AA0000")
