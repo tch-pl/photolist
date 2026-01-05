@@ -3,6 +3,7 @@ from tkinter import filedialog, scrolledtext, messagebox, Label, ttk
 from PIL import Image, ImageTk
 import sys
 import os
+import shutil
 import concurrent.futures
 import threading
 import math
@@ -12,6 +13,7 @@ import time
 sys.path.append(os.path.join(os.path.dirname(__file__), 'data'))
 import data.ImageData as ImageData
 from data.storage import ScanResultStorage
+from data.TargetPathResolver import TargetPathResolver
 
 class Redirector:
     def __init__(self, text_widget):
@@ -130,6 +132,9 @@ class DuplicateFinderGUI:
         
         self.load_btn = tk.Button(control_frame, text="Load Results", command=self.load_results_from_storage, bg="#dddddd")
         self.load_btn.pack(pady=5, side=tk.LEFT, padx=5)
+        
+        self.copy_btn = tk.Button(control_frame, text="Copy Distinct Items", command=self.copy_distinct_items_thread, bg="#dddddd")
+        self.copy_btn.pack(pady=5, side=tk.LEFT, padx=5)
 
         # Control Buttons
         ctrl_frame = tk.Frame(control_frame)
@@ -720,6 +725,129 @@ class DuplicateFinderGUI:
             except Exception as e:
                 print(f"Failed to auto-load results: {e}")
                 self.storage_status_label.config(text="Previous results could not be loaded", fg="#AA6600")
+    
+    def copy_distinct_items_thread(self):
+        """Start thread to copy all distinct items to target location."""
+        if not self.duplicates_data:
+            messagebox.showwarning("Warning", "No results to copy. Please run a scan or load results first.")
+            return
+        
+        # Ask user for target root directory
+        target_root = filedialog.askdirectory(title="Select Target Root Directory")
+        if not target_root:
+            return  # User cancelled
+        
+        # Calculate total size of distinct items
+        total_size = 0
+        for idx, (img_data, paths) in self.duplicates_data.items():
+            total_size += img_data.size
+        
+        # Check available disk space
+        try:
+            disk_usage = shutil.disk_usage(target_root)
+            available_space = disk_usage.free
+            
+            if total_size > available_space:
+                messagebox.showerror(
+                    "Insufficient Space",
+                    f"Not enough disk space!\n\n"
+                    f"Required: {self.format_size(total_size)}\n"
+                    f"Available: {self.format_size(available_space)}\n\n"
+                    f"Please select a different target directory."
+                )
+                return
+            
+            # Show confirmation with space info
+            response = messagebox.askyesno(
+                "Confirm Copy",
+                f"Copy {len(self.duplicates_data)} distinct items to:\n{target_root}\n\n"
+                f"Total size: {self.format_size(total_size)}\n"
+                f"Available space: {self.format_size(available_space)}\n\n"
+                f"Continue?"
+            )
+            
+            if not response:
+                return
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to check disk space: {e}")
+            return
+        
+        # Disable button during operation
+        self.copy_btn.config(state=tk.DISABLED)
+        
+        # Start copy thread
+        thread = threading.Thread(target=self.copy_distinct_items, args=(target_root,))
+        thread.daemon = True
+        thread.start()
+    
+    def copy_distinct_items(self, target_root):
+        """Copy all distinct items to target location with date-based paths."""
+        old_stdout = sys.stdout
+        sys.stdout = self.redirector
+        
+        try:
+            resolver = TargetPathResolver()
+            copied_count = 0
+            error_count = 0
+            
+            print(f"\nStarting copy operation to: {target_root}")
+            print(f"Total distinct items: {len(self.duplicates_data)}\n")
+            
+            for idx, (img_data, paths) in self.duplicates_data.items():
+                try:
+                    # Resolve date-based path
+                    date_path = resolver.resolve(img_data)
+                    
+                    if not date_path:
+                        print(f"Warning: Could not resolve date path for {img_data.filename}, skipping...")
+                        error_count += 1
+                        continue
+                    
+                    # Combine root with resolved path (remove leading slash from date_path)
+                    target_dir = os.path.join(target_root, date_path.lstrip('/\\'))
+                    
+                    # Create directory if it doesn't exist
+                    os.makedirs(target_dir, exist_ok=True)
+                    
+                    # Get source file (first path from the set)
+                    source_file = list(paths)[0]
+                    target_file = os.path.join(target_dir, img_data.filename)
+                    
+                    # Handle filename conflicts
+                    if os.path.exists(target_file):
+                        base, ext = os.path.splitext(img_data.filename)
+                        counter = 1
+                        while os.path.exists(target_file):
+                            target_file = os.path.join(target_dir, f"{base}_{counter}{ext}")
+                            counter += 1
+                    
+                    # Copy file
+                    shutil.copy2(source_file, target_file)
+                    copied_count += 1
+                    print(f"[{copied_count}/{len(self.duplicates_data)}] Copied: {img_data.filename} -> {date_path}")
+                    
+                except Exception as e:
+                    print(f"Error copying {img_data.filename}: {e}")
+                    error_count += 1
+            
+            # Show completion message
+            summary = f"\nCopy operation complete!\n\nCopied: {copied_count} files\nErrors: {error_count}"
+            print(summary)
+            
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Copy Complete",
+                f"Successfully copied {copied_count} distinct items.\n\nErrors: {error_count}"
+            ))
+            
+        except Exception as e:
+            print(f"\nCopy operation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Copy operation failed: {e}"))
+        finally:
+            sys.stdout = old_stdout
+            self.root.after(0, lambda: self.copy_btn.config(state=tk.NORMAL))
 
 if __name__ == "__main__":
     root = tk.Tk()
