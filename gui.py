@@ -199,6 +199,8 @@ class DuplicateFinderGUI:
         # Auto-load previous results on startup
        # self.auto_load_on_startup()
 
+        self.loaded_uniques = []
+
     def add_folder(self):
         folder = filedialog.askdirectory()
         if folder:
@@ -254,6 +256,8 @@ class DuplicateFinderGUI:
         self.details_text.delete(1.0, tk.END)
         self.log_area.delete(1.0, tk.END)
         self.duplicates_data = {}
+        self.loaded_uniques = []
+        self.loaded_from_storage = False
         self.preview_label.config(image="", text="No Preview")
 
         # Reset Controller
@@ -513,6 +517,9 @@ class DuplicateFinderGUI:
             # Populate GUI on main thread
             self.root.after(0, lambda: self.populate_results(all_duplicates))
             
+            # Store uniques? Not currently stored in duplicates_data but useful for report
+            self.loaded_uniques = all_uniques
+            
         except ImageData.ProcessingCancelled:
             print("\n[!] Processing Cancelled by User.")
         except Exception as e:
@@ -534,6 +541,12 @@ class DuplicateFinderGUI:
                  self.root.after(0, lambda: self.progress_label.config(text="Done."))
 
     def start_report_thread(self):
+        # Case 1: Load from storage (No re-scan needed)
+        if self.loaded_from_storage and self.duplicates_data:
+            self.generate_report_from_memory()
+            return
+
+        # Case 2: Process folders
         folders = [self.folder_tree.item(item)['values'][0] for item in self.folder_tree.get_children()]
         if not folders:
             messagebox.showwarning("Warning", "Please add at least one folder.")
@@ -555,6 +568,61 @@ class DuplicateFinderGUI:
         thread = threading.Thread(target=self.run_report, args=(list(folders), ext))
         thread.daemon = True
         thread.start()
+
+    def generate_report_from_memory(self):
+        """Generate report from loaded uniques and duplicates without re-scanning."""
+        try:
+            # Reconstruct report structure
+            uniques = self.loaded_uniques if hasattr(self, 'loaded_uniques') else []
+            duplicates = {}
+            # Restore duplicate structure (duplicates_data is id -> (img, paths))
+            for idx, (img, paths) in self.duplicates_data.items():
+                duplicates[img] = paths
+                
+            # Use calculate_distinct_size to get totals
+            distinct_size, total_files, distinct_files = ImageData.calculate_distinct_size(uniques, duplicates)
+            
+            total_size = 0
+            # Sum unqiues
+            for u in uniques: total_size += u.size
+            # Sum duplicates
+            for img, paths in duplicates.items():
+                total_size += img.size * len(paths)
+                
+            # If loaded from partial storage (uniques missing), distinct_files might be just duplicates count
+            # Use distinct_size from calculation
+            
+            # Find clashes (re-implement clash logic from analyze_dataset)
+            clashes = {}
+            # Combine all for name check
+            all_content = []
+            all_content.extend(uniques)
+            for img in duplicates:
+                all_content.append(img)
+            
+            filename_map = {}
+            for img in all_content:
+                if img.filename not in filename_map:
+                    filename_map[img.filename] = []
+                filename_map[img.filename].append(img)
+            
+            for fname, versions in filename_map.items():
+                if len(versions) > 1:
+                    clashes[fname] = versions
+            
+            report = {
+                'total_files': total_files,
+                'distinct_items': distinct_files,
+                'total_size': total_size,
+                'unique_size': distinct_size,
+                'clashes': clashes
+            }
+            
+            self.show_report_window(report)
+            
+        except Exception as e:
+            messagebox.showerror("Report Error", f"Failed to generate report from loaded data: {e}")
+            print(f"Report Generation Error: {e}")
 
     def run_report(self, folders, ext):
         # Redirect stdout
@@ -702,6 +770,9 @@ class DuplicateFinderGUI:
             # Populate with loaded data
             self.populate_results(duplicates)
             self.loaded_from_storage = True
+            
+            # Store uniques if available
+            self.loaded_uniques = uniques if uniques else []
             
             self.storage_status_label.config(text=f"✓ Loaded {len(duplicates)} groups from {os.path.basename(filepath)}", fg="#0066CC")
             self.log_area.insert(tk.END, f"Loaded {len(duplicates)} duplicate groups from {filepath}.\n")
