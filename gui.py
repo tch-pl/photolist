@@ -504,6 +504,41 @@ class DuplicateFinderGUI:
             if self.controller and self.controller.cancelled.is_set():
                 raise ImageData.ProcessingCancelled("User cancelled processing")
 
+            # CRITICAL FIX: Re-check uniques for cross-folder duplicates
+            # When processing folders in parallel, each folder's files are marked as unique WITHIN that folder
+            # But files in folder A might be duplicates of files in folder B!
+            # We need to check all "uniques" against each other to find cross-folder duplicates
+            print(f"\nMerging results from {total_folders} folders...")
+            print(f"Pre-merge: {len(all_uniques)} unique files, {len(all_duplicates)} duplicate groups")
+            
+            # Build a map of all images (including current duplicates)
+            image_map = {}
+            
+            # Add existing duplicates first
+            for img_data, paths in all_duplicates.items():
+                image_map[img_data] = paths
+            
+            # Now check each "unique" against the map
+            final_uniques = []
+            for img_data in all_uniques:
+                if img_data in image_map:
+                    # This "unique" matches an existing entry - it's actually a duplicate!
+                    image_map[img_data].add(img_data.path)
+                else:
+                    # First time seeing this image
+                    image_map[img_data] = {img_data.path}
+            
+            # Rebuild duplicates and uniques from the merged map
+            all_duplicates = {}
+            final_uniques = []
+            for img_data, paths in image_map.items():
+                if len(paths) > 1:
+                    all_duplicates[img_data] = paths
+                else:
+                    final_uniques.append(img_data)
+            
+            all_uniques = final_uniques
+            
             print("\nProcessing complete.")
             print(f"Found {len(all_uniques)} unique files.")
             print(f"Found {len(all_duplicates)} duplicate groups.")
@@ -515,9 +550,10 @@ class DuplicateFinderGUI:
             print(f"Distinct files total size: {self.format_size(distinct_size)}")
             
             # Populate GUI on main thread
-            self.root.after(0, lambda: self.populate_results(all_duplicates))
+            # Use default argument to capture current value and avoid late binding issues
+            self.root.after(0, lambda d=all_duplicates, u=all_uniques: self.populate_results(d))
             
-            # Store uniques? Not currently stored in duplicates_data but useful for report
+            # Store uniques - not currently stored in duplicates_data but useful for report
             self.loaded_uniques = all_uniques
             
         except ImageData.ProcessingCancelled:
@@ -690,6 +726,12 @@ class DuplicateFinderGUI:
         self.groups_list.delete(0, tk.END)
         self.duplicates_data = {}
         
+        if not duplicates_dict:
+            # Show informative message when no duplicates found
+            self.groups_list.insert(tk.END, "[No duplicate groups found]")
+            self.groups_list.itemconfig(0, {'fg': '#888888'})
+            return
+        
         idx = 0
         for img_data, paths in duplicates_dict.items():
             label = f"{img_data.filename} ({len(paths)} copies)"
@@ -699,7 +741,8 @@ class DuplicateFinderGUI:
     
     def save_results_to_storage(self):
         """Save current scan results to storage with file path selection."""
-        if not self.duplicates_data:
+        # Check if there are any results to save (either duplicates or uniques)
+        if not self.duplicates_data and not self.loaded_uniques:
             messagebox.showinfo("Info", "No results to save. Please run a scan first.")
             return
         
@@ -721,9 +764,8 @@ class DuplicateFinderGUI:
             for idx, (img_data, paths) in self.duplicates_data.items():
                 duplicates[img_data] = paths
             
-            # For now, we don't track uniques in the GUI, so pass empty list
-            # In a full implementation, you might want to store uniques too
-            success = ScanResultStorage.save_results([], duplicates, filepath)
+            # Save both uniques and duplicates
+            success = ScanResultStorage.save_results(self.loaded_uniques, duplicates, filepath)
             
             if success:
                 self.storage_status_label.config(text=f"✓ Results saved to {os.path.basename(filepath)}", fg="#00AA00")
@@ -799,19 +841,98 @@ class DuplicateFinderGUI:
     
     def copy_distinct_items_thread(self):
         """Start thread to copy all distinct items to target location."""
-        if not self.duplicates_data:
+        if not self.duplicates_data and not self.loaded_uniques:
             messagebox.showwarning("Warning", "No results to copy. Please run a scan or load results first.")
             return
         
-        # Ask user for target root directory
-        target_root = filedialog.askdirectory(title="Select Target Root Directory")
-        if not target_root:
+        # Show configuration dialog
+        config_dialog = tk.Toplevel(self.root)
+        config_dialog.title("Copy Distinct Items - Configuration")
+        config_dialog.geometry("500x250")
+        config_dialog.transient(self.root)
+        config_dialog.grab_set()
+        
+        # Target directory
+        tk.Label(config_dialog, text="Target Base Directory:", font=("Arial", 10, "bold")).pack(pady=(10, 5), anchor=tk.W, padx=10)
+        
+        dir_frame = tk.Frame(config_dialog)
+        dir_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        target_dir_var = tk.StringVar()
+        dir_entry = tk.Entry(dir_frame, textvariable=target_dir_var, state="readonly", width=50)
+        dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        def browse_directory():
+            folder = filedialog.askdirectory(title="Select Target Base Directory")
+            if folder:
+                target_dir_var.set(folder)
+        
+        tk.Button(dir_frame, text="Browse...", command=browse_directory).pack(side=tk.LEFT)
+        
+        # Path pattern
+        tk.Label(config_dialog, text="Path Pattern:", font=("Arial", 10, "bold")).pack(pady=(15, 5), anchor=tk.W, padx=10)
+        tk.Label(config_dialog, text="Use {year}, {month}, {day} placeholders", font=("Arial", 8), fg="#666666").pack(anchor=tk.W, padx=10)
+        
+        pattern_var = tk.StringVar(value="/{year}/{month}/{day}")
+        pattern_entry = tk.Entry(config_dialog, textvariable=pattern_var, width=50)
+        pattern_entry.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Buttons
+        btn_frame = tk.Frame(config_dialog)
+        btn_frame.pack(pady=20)
+        
+        result_container = {"target_root": None, "pattern": None}
+        
+        def on_start():
+            target = target_dir_var.get()
+            pattern = pattern_var.get().strip()
+            
+            if not target:
+                messagebox.showwarning("Warning", "Please select a target directory.")
+                return
+            
+            if not pattern:
+                messagebox.showwarning("Warning", "Please enter a path pattern.")
+                return
+            
+            # Validate pattern has at least one placeholder
+            if "{year}" not in pattern and "{month}" not in pattern and "{day}" not in pattern:
+                response = messagebox.askyesno(
+                    "Warning", 
+                    "Pattern doesn't contain any date placeholders ({year}, {month}, {day}).\n\n"
+                    "All files will be copied to the same directory.\n\nContinue?"
+                )
+                if not response:
+                    return
+            
+            result_container["target_root"] = target
+            result_container["pattern"] = pattern
+            config_dialog.destroy()
+        
+        def on_cancel():
+            config_dialog.destroy()
+        
+        tk.Button(btn_frame, text="Start Copy", command=on_start, bg="#4CAF50", fg="white", width=12).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", command=on_cancel, width=12).pack(side=tk.LEFT, padx=5)
+        
+        # Wait for dialog to close
+        self.root.wait_window(config_dialog)
+        
+        target_root = result_container["target_root"]
+        pattern = result_container["pattern"]
+        
+        if not target_root or not pattern:
             return  # User cancelled
         
-        # Calculate total size of distinct items
+        # Calculate total size of distinct items (duplicates + uniques)
         total_size = 0
-        for idx, (img_data, paths) in self.duplicates_data.items():
+        total_count = 0
+        
+        
+        
+        for img_data in self.loaded_uniques:
             total_size += img_data.size
+            total_count += 1
         
         # Check available disk space
         try:
@@ -831,7 +952,8 @@ class DuplicateFinderGUI:
             # Show confirmation with space info
             response = messagebox.askyesno(
                 "Confirm Copy",
-                f"Copy {len(self.duplicates_data)} distinct items to:\n{target_root}\n\n"
+                f"Copy {total_count} distinct items to:\n{target_root}\n\n"
+                f"Pattern: {pattern}\n"
                 f"Total size: {self.format_size(total_size)}\n"
                 f"Available space: {self.format_size(available_space)}\n\n"
                 f"Continue?"
@@ -844,27 +966,34 @@ class DuplicateFinderGUI:
             messagebox.showerror("Error", f"Failed to check disk space: {e}")
             return
         
-        # Disable button during operation
+        # Disable button during operation and show initial progress
         self.copy_btn.config(state=tk.DISABLED)
+        self.progress_label.config(text="Starting copy operation...")
         
         # Start copy thread
-        thread = threading.Thread(target=self.copy_distinct_items, args=(target_root,))
+        thread = threading.Thread(target=self.copy_distinct_items, args=(target_root, pattern))
         thread.daemon = True
         thread.start()
     
-    def copy_distinct_items(self, target_root):
+    def copy_distinct_items(self, target_root, pattern):
         """Copy all distinct items to target location with date-based paths."""
         old_stdout = sys.stdout
         sys.stdout = self.redirector
         
         try:
-            resolver = TargetPathResolver()
+            resolver = TargetPathResolver(pattern)
             copied_count = 0
             error_count = 0
             
-            print(f"\nStarting copy operation to: {target_root}")
-            print(f"Total distinct items: {len(self.duplicates_data)}\n")
+            total_items = len(self.duplicates_data) + len(self.loaded_uniques)
             
+            print(f"\nStarting copy operation to: {target_root}")
+            print(f"Using pattern: {pattern}")
+            print(f"Total distinct items: {total_items}")
+            print(f"  - Duplicates (1 per group): {len(self.duplicates_data)}")
+            print(f"  - Unique items: {len(self.loaded_uniques)}\n")
+            
+            # Copy one representative from each duplicate group
             for idx, (img_data, paths) in self.duplicates_data.items():
                 try:
                     # Resolve date-based path
@@ -881,7 +1010,7 @@ class DuplicateFinderGUI:
                     # Create directory if it doesn't exist
                     os.makedirs(target_dir, exist_ok=True)
                     
-                    # Get source file (first path from the set)
+                    # Get source file (first path from the set) - only ONE from the duplicate group
                     source_file = list(paths)[0]
                     target_file = os.path.join(target_dir, img_data.filename)
                     
@@ -896,7 +1025,59 @@ class DuplicateFinderGUI:
                     # Copy file
                     shutil.copy2(source_file, target_file)
                     copied_count += 1
-                    print(f"[{copied_count}/{len(self.duplicates_data)}] Copied: {img_data.filename} -> {date_path}")
+                    
+                    # Update progress on GUI
+                    percentage = (copied_count / total_items) * 100
+                    self.root.after(0, lambda c=copied_count, t=total_items, f=img_data.filename, p=percentage: 
+                        self.progress_label.config(text=f"Copying: {f} ({c}/{t} - {p:.1f}%)"))
+                    
+                    # Show which file was selected from the duplicate group
+                    print(f"[{copied_count}/{total_items}] Copied (dup 1/{len(paths)}): {img_data.filename} -> {date_path}")
+                    print(f"    Source: {source_file}")
+                    
+                except Exception as e:
+                    print(f"Error copying {img_data.filename}: {e}")
+                    error_count += 1
+            
+            # Copy all unique items
+            for img_data in self.loaded_uniques:
+                try:
+                    # Resolve date-based path
+                    date_path = resolver.resolve(img_data)
+                    
+                    if not date_path:
+                        print(f"Warning: Could not resolve date path for {img_data.filename}, skipping...")
+                        error_count += 1
+                        continue
+                    
+                    # Combine root with resolved path (remove leading slash from date_path)
+                    target_dir = os.path.join(target_root, date_path.lstrip('/\\'))
+                    
+                    # Create directory if it doesn't exist
+                    os.makedirs(target_dir, exist_ok=True)
+                    
+                    # Get source file
+                    source_file = img_data.path
+                    target_file = os.path.join(target_dir, img_data.filename)
+                    
+                    # Handle filename conflicts
+                    if os.path.exists(target_file):
+                        base, ext = os.path.splitext(img_data.filename)
+                        counter = 1
+                        while os.path.exists(target_file):
+                            target_file = os.path.join(target_dir, f"{base}_{counter}{ext}")
+                            counter += 1
+                    
+                    # Copy file
+                    shutil.copy2(source_file, target_file)
+                    copied_count += 1
+                    
+                    # Update progress on GUI
+                    percentage = (copied_count / total_items) * 100
+                    self.root.after(0, lambda c=copied_count, t=total_items, f=img_data.filename, p=percentage: 
+                        self.progress_label.config(text=f"Copying: {f} ({c}/{t} - {p:.1f}%)"))
+                    
+                    print(f"[{copied_count}/{total_items}] Copied (unique): {img_data.filename} -> {date_path}")
                     
                 except Exception as e:
                     print(f"Error copying {img_data.filename}: {e}")
@@ -906,13 +1087,18 @@ class DuplicateFinderGUI:
             summary = f"\nCopy operation complete!\n\nCopied: {copied_count} files\nErrors: {error_count}"
             print(summary)
             
-            self.root.after(0, lambda: messagebox.showinfo(
+            # Update progress label to show completion
+            self.root.after(0, lambda c=copied_count, e=error_count: 
+                self.progress_label.config(text=f"Copy complete: {c} files copied, {e} errors"))
+            
+            self.root.after(0, lambda c=copied_count, e=error_count: messagebox.showinfo(
                 "Copy Complete",
-                f"Successfully copied {copied_count} distinct items.\n\nErrors: {error_count}"
+                f"Successfully copied {c} distinct items.\n\nErrors: {e}"
             ))
             
         except Exception as e:
             print(f"\nCopy operation failed: {e}")
+            self.root.after(0, lambda: self.progress_label.config(text="Copy failed!"))
             import traceback
             traceback.print_exc()
             self.root.after(0, lambda: messagebox.showerror("Error", f"Copy operation failed: {e}"))
