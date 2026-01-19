@@ -1,11 +1,12 @@
+
 import json
 import os
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 from . import ImageData as ImgData
-
+from .ScanResult import ScanResult
 
 class ScanResultStorage:
-    """Manages persistent storage of duplicate scan results in JSON format."""
+    """Manages persistent storage of ScanResult objects in JSON format."""
     
     DEFAULT_STORAGE_PATH = os.path.join(os.path.dirname(__file__), 'scan_results.json')
     
@@ -51,13 +52,12 @@ class ScanResultStorage:
             )
     
     @staticmethod
-    def save_results(uniques: List, duplicates: Dict, filepath: str = None) -> bool:
+    def save_results(scan_result: ScanResult, filepath: str = None) -> bool:
         """
-        Save scan results to JSON file.
+        Save ScanResult to JSON file.
         
         Args:
-            uniques: List of unique ImageData objects
-            duplicates: Dict mapping ImageData to set of file paths
+            scan_result: ScanResult object to save
             filepath: Path to save file (uses default if None)
             
         Returns:
@@ -69,20 +69,26 @@ class ScanResultStorage:
         try:
             # Prepare data structure for JSON
             data = {
-                'version': '1.0',
+                'version': '2.0', # Version bumped for ScanResult support
+                'metadata': {
+                    'timestamp': scan_result.timestamp,
+                    'scanned_paths': scan_result.scanned_paths,
+                    'extension': scan_result.extension,
+                    'detection_mode': scan_result.detection_mode
+                },
                 'uniques': [],
                 'duplicates': []
             }
             
             # Serialize uniques
-            for img in uniques:
+            for img in scan_result.uniques:
                 data['uniques'].append({
                     'image_data': ScanResultStorage._serialize_image_data(img),
                     'paths': [img.path]  # Unique items have single path
                 })
             
             # Serialize duplicates
-            for img_data, paths in duplicates.items():
+            for img_data, paths in scan_result.duplicates.items():
                 data['duplicates'].append({
                     'image_data': ScanResultStorage._serialize_image_data(img_data),
                     'paths': list(paths)  # Convert set to list for JSON
@@ -99,16 +105,15 @@ class ScanResultStorage:
             return False
     
     @staticmethod
-    def load_results(filepath: str = None) -> Tuple[List, Dict]:
+    def load_results(filepath: str = None) -> Optional[ScanResult]:
         """
-        Load scan results from JSON file.
+        Load ScanResult from JSON file.
         
         Args:
             filepath: Path to load file (uses default if None)
             
         Returns:
-            Tuple of (uniques_list, duplicates_dict)
-            Returns ([], {}) if file doesn't exist or is corrupted
+            ScanResult object, or None if file doesn't exist or is corrupted
         """
         if filepath is None:
             filepath = ScanResultStorage.DEFAULT_STORAGE_PATH
@@ -116,16 +121,13 @@ class ScanResultStorage:
         # Check if file exists
         if not os.path.exists(filepath):
             print(f"Storage file not found: {filepath}")
-            return [], {}
+            return None
         
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            # Validate version (for future compatibility)
             version = data.get('version', '1.0')
-            if version != '1.0':
-                print(f"Warning: Storage version {version} may not be fully compatible")
             
             # Deserialize uniques
             uniques = []
@@ -139,15 +141,29 @@ class ScanResultStorage:
                 img_data = ScanResultStorage._deserialize_image_data(item['image_data'])
                 paths = set(item['paths'])  # Convert list back to set
                 duplicates[img_data] = paths
+                
+            # Handle metadata (Version 1.0 compatibility: Default values)
+            metadata = data.get('metadata', {})
             
-            return uniques, duplicates
+            scan_result = ScanResult(
+                uniques=uniques,
+                duplicates=duplicates,
+                scanned_paths=metadata.get('scanned_paths', []),
+                extension=metadata.get('extension', ''),
+                detection_mode=metadata.get('detection_mode', 'unknown'),
+                timestamp=metadata.get('timestamp', None)
+            )
+            
+            return scan_result
             
         except json.JSONDecodeError as e:
             print(f"Error: Corrupted storage file (invalid JSON): {e}")
-            return [], {}
+            return None
         except Exception as e:
             print(f"Error loading results from storage: {e}")
-            return [], {}
+            import traceback
+            traceback.print_exc()
+            return None
     
     @staticmethod
     def clear_storage(filepath: str = None) -> bool:
