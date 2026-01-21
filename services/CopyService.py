@@ -96,14 +96,12 @@ class CopyService:
         source_file = list(paths)[0]
         target_file = os.path.join(target_dir, img_data.filename)
         
-        # Handle conflicts
+        # Handle conflicts - SKIP if exists
         if os.path.exists(target_file):
-            base, ext = os.path.splitext(img_data.filename)
-            counter = 1
-            while os.path.exists(target_file):
-                target_file = os.path.join(target_dir, f"{base}_{counter}{ext}")
-                counter += 1
-                
+            if log_callback:
+                log_callback(f"Skipping (already exists): {img_data.filename} -> {target_file}")
+            return
+
         shutil.copy2(source_file, target_file)
         if log_callback:
             log_callback(f"Copied: {img_data.filename} -> {date_path}")

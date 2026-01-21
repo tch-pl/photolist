@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import ttk
 
 class ControlPanel(tk.Frame):
-    def __init__(self, parent, on_scan_click, on_report_click, on_save_click, on_load_click, on_copy_click, on_pause_click, on_cancel_click):
+    def __init__(self, parent, on_scan_click, on_report_click, on_save_click, on_load_click, on_merge_click, on_copy_click, on_pause_click, on_cancel_click):
         super().__init__(parent)
         
         # Extension Input
@@ -39,6 +39,9 @@ class ControlPanel(tk.Frame):
         self.load_btn = tk.Button(btn_frame, text="Import scan result", command=on_load_click, bg="#dddddd")
         self.load_btn.pack(side=tk.LEFT, padx=5)
         
+        self.merge_btn = tk.Button(btn_frame, text="Merge with Result", command=on_merge_click, bg="#dddddd")
+        self.merge_btn.pack(side=tk.LEFT, padx=5)
+        
         self.copy_btn = tk.Button(btn_frame, text="Archive distinct images", command=on_copy_click, bg="#dddddd")
         self.copy_btn.pack(side=tk.LEFT, padx=5)
         
@@ -67,6 +70,7 @@ class ControlPanel(tk.Frame):
         # Save/Load/Copy might be allowed depending on context, but generally disabled during scan
         self.save_btn.config(state=state)
         self.load_btn.config(state=state) 
+        self.merge_btn.config(state=state)
         # self.copy_btn.config(state=state) # Actually copy is a separate process
         
         self.pause_btn.config(state=ctrl_state)

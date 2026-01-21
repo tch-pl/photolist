@@ -48,7 +48,8 @@ class ScannerService:
              ext: str, 
              use_checksum: bool = False,
              progress_callback: Callable[[str, int, int], None] = None,
-             log_callback: Callable[[str], None] = None) -> ScanResult:
+             log_callback: Callable[[str], None] = None,
+             base_result: Optional[ScanResult] = None) -> ScanResult:
         """
         Run the scan process.
         
@@ -170,6 +171,33 @@ class ScannerService:
                     final_duplicates[img_data] = paths
                 else:
                     final_uniques.append(img_data)
+            
+            # Filter against base_result if provided
+            if base_result:
+                log(f"Filtering results against base result ({len(base_result.uniques)} unique, {len(base_result.duplicates)} duplicate groups)...")
+                
+                # Build set of known items
+                known_items = set()
+                known_items.update(base_result.uniques)
+                known_items.update(base_result.duplicates.keys())
+                
+                filtered_uniques = []
+                filtered_duplicates = {}
+                
+                # Filter uniques
+                for u in final_uniques:
+                    if u not in known_items:
+                        filtered_uniques.append(u)
+                        
+                # Filter duplicates
+                for d, paths in final_duplicates.items():
+                    if d not in known_items:
+                        filtered_duplicates[d] = paths
+                        
+                final_uniques = filtered_uniques
+                final_duplicates = filtered_duplicates
+                
+                log(f"After filtering: {len(final_uniques)} unique files and {len(final_duplicates)} distinct duplicate groups.")
             
             log(f"Processing complete. Found {len(final_uniques)} unique files and {len(final_duplicates)} distinct duplicate groups.")
             

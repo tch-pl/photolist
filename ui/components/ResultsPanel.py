@@ -18,9 +18,9 @@ class ResultsPanel(tk.Frame):
         self.paned_window = tk.PanedWindow(self, orient=tk.HORIZONTAL)
         self.paned_window.pack(fill=tk.BOTH, expand=True)
 
-        # Left Panel: Groups List
+        # Left Panel: Results List
         left_frame = tk.Frame(self.paned_window)
-        tk.Label(left_frame, text="Duplicate Groups:").pack(anchor=tk.W)
+        tk.Label(left_frame, text="Scan Results:").pack(anchor=tk.W)
         
         self.groups_list = tk.Listbox(left_frame, width=40)
         self.groups_list.pack(fill=tk.BOTH, expand=True)
@@ -68,19 +68,37 @@ class ResultsPanel(tk.Frame):
                       f"Duplicate Groups: {scan_result.duplicate_groups_count}")
         self.stats_label.config(text=stats_text, font=("Arial", 9, "bold"), fg="black")
 
-        if not scan_result.duplicates:
+        # Collect all items to display
+        # List of tuples: (displayed_text, ImageData, paths_list_or_None)
+        items = []
+
+        # Add duplicates
+        for img_data, paths in scan_result.duplicates.items():
+            items.append((f"{img_data.filename} ({len(paths)} copies)", img_data, paths))
+
+        # Add uniques (if any are explicitly interesting, e.g. from merge)
+        # Note: In standard scan, uniques are usually not shown in this list. 
+        # But user requested "list of scan result items". 
+        # For Merge scan, 'uniques' are the result.
+        for img_data in scan_result.uniques:
+            items.append((f"{img_data.filename}", img_data, None))
+
+        if not items:
             self._show_empty_message()
             return
+            
+        # Sort items by filename
+        items.sort(key=lambda x: x[0])
 
         idx = 0
-        for img_data, paths in scan_result.duplicates.items():
-            label = f"{img_data.filename} ({len(paths)} copies)"
+        for label, img_data, paths in items:
             self.groups_list.insert(tk.END, label)
+            # Store data: (ImageData, paths) -> paths is None for unique items
             self.duplicates_data[idx] = (img_data, paths)
             idx += 1
             
     def _show_empty_message(self):
-        self.groups_list.insert(tk.END, "[No duplicate groups found]")
+        self.groups_list.insert(tk.END, "[No items found]")
         self.groups_list.itemconfig(0, {'fg': '#888888'})
 
     def _on_group_select(self, event):
@@ -97,6 +115,9 @@ class ResultsPanel(tk.Frame):
             if paths:
                 first_path = list(paths)[0]
                 self._show_preview(first_path)
+            else:
+                # Unique item, use its own path
+                self._show_preview(img_data.path)
 
     def _show_details(self, img_data, paths):
         self.details_text.delete(1.0, tk.END)
@@ -106,10 +127,15 @@ class ResultsPanel(tk.Frame):
         exif_str = str(img_data.exif_date) if img_data.exif_date else "No EXIF"
         self.details_text.insert(tk.END, f"EXIF Date: {exif_str}\n")
         self.details_text.insert(tk.END, "-"*40 + "\n")
-        self.details_text.insert(tk.END, f"Count: {len(paths)}\n")
-        self.details_text.insert(tk.END, "Paths:\n")
-        for p in paths:
-            self.details_text.insert(tk.END, f"  {p}\n")
+        
+        if paths:
+            self.details_text.insert(tk.END, f"Count: {len(paths)}\n")
+            self.details_text.insert(tk.END, "Paths (Duplicates):\n")
+            for p in paths:
+                self.details_text.insert(tk.END, f"  {p}\n")
+        else:
+            self.details_text.insert(tk.END, "Unique Item\n")
+            self.details_text.insert(tk.END, f"Path: {img_data.path}\n")
 
     def _show_preview(self, path):
         try:

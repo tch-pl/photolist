@@ -46,6 +46,7 @@ class MainWindow(tk.Tk):
             on_report_click=self._generate_report,
             on_save_click=self._save_results,
             on_load_click=self._load_results,
+            on_merge_click=self._merge_scan,
             on_copy_click=self._copy_distinct,
             on_pause_click=self._toggle_pause,
             on_cancel_click=self._cancel_processing
@@ -103,7 +104,57 @@ class MainWindow(tk.Tk):
         thread.daemon = True
         thread.start()
         
-    def _run_scan_thread(self, folders, ext, use_checksum):
+    def _merge_scan(self):
+        """Start a new scan but merge/filter against an existing result."""
+        # 1. Validation (folders, ext)
+        folders = self.folder_panel.get_folders()
+        if not folders:
+            messagebox.showwarning("Warning", "Please add at least one folder to scan.")
+            return
+            
+        ext = self.control_panel.get_extension()
+        if not ext:
+            messagebox.showwarning("Warning", "Please specify a file extension.")
+            return
+            
+        use_checksum = self.control_panel.get_use_checksum()
+        
+        # 2. Select Base Result
+        filepath = filedialog.askopenfilename(
+            title="Select Base Scan Result",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")]
+        )
+        if not filepath: return
+        
+        # 3. Load Base Result
+        try:
+            base_result = ScanResultStorage.load_results(filepath)
+            if not base_result:
+                messagebox.showerror("Error", "Failed to load base result file.")
+                return
+            self._log(f"Loaded base result from {os.path.basename(filepath)} ({base_result.total_files_scanned} files)")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error loading base result: {e}")
+            return
+            
+        # 4. Start Scan (filtered)
+        # Reset UI
+        self.results_panel.custom_clear()
+        self.log_area.delete(1.0, tk.END)
+        self.current_scan_result = None
+        self.folder_panel.clear_status()
+        
+        self._set_processing(True)
+        self.status_label.config(text=f"Starting merged scan (against {os.path.basename(filepath)})...")
+        self.animation_panel.start()
+        
+        # Run in thread with base_result
+        thread = threading.Thread(target=self._run_scan_thread, args=(folders, ext, use_checksum, base_result))
+        thread.daemon = True
+        thread.start()
+
+    def _run_scan_thread(self, folders, ext, use_checksum, base_result=None):
         try:
             def progress_cb(msg, current, total):
                 self.after(0, lambda: self.status_label.config(text=msg))
@@ -116,7 +167,8 @@ class MainWindow(tk.Tk):
                 ext, 
                 use_checksum=use_checksum,
                 progress_callback=progress_cb,
-                log_callback=log_cb
+                log_callback=log_cb,
+                base_result=base_result
             )
             
             self.after(0, lambda: self._on_scan_complete(result))
