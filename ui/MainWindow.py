@@ -30,7 +30,39 @@ class MainWindow(tk.Tk):
         self._init_ui()
         self.after(100, self._auto_load_results) # Run after UI init
         
+    def _init_menu_bar(self):
+        """Initialize the menu bar with File and Actions menus."""
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        
+        # File Menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        file_menu.add_command(label="Import scan result", command=self._load_results)
+        file_menu.add_command(label="Export scan result", command=self._save_results)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.quit)
+        
+        # Actions Menu
+        actions_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Actions", menu=actions_menu)
+        
+        self.scan_menu_item = actions_menu.add_command(label="Scan files", command=self._start_scan)
+        self.merge_menu_item = actions_menu.add_command(label="Merge with Result", command=self._merge_scan)
+        self.report_menu_item = actions_menu.add_command(label="Generate Report", command=self._generate_report)
+        self.copy_menu_item = actions_menu.add_command(label="Archive distinct images", command=self._copy_distinct)
+        actions_menu.add_separator()
+        self.pause_menu_item = actions_menu.add_command(label="Pause", command=self._toggle_pause, state=tk.DISABLED)
+        self.cancel_menu_item = actions_menu.add_command(label="Cancel", command=self._cancel_processing, state=tk.DISABLED)
+        
+        # Store menu references for state management
+        self.actions_menu = actions_menu
+        
     def _init_ui(self):
+        # Menu Bar
+        self._init_menu_bar()
+        
         # 1. Top Control Container
         top_frame = tk.Frame(self)
         top_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -39,18 +71,8 @@ class MainWindow(tk.Tk):
         self.folder_panel = FolderListPanel(top_frame)
         self.folder_panel.pack(fill=tk.X, pady=5)
         
-        # Controls
-        self.control_panel = ControlPanel(
-            top_frame,
-            on_scan_click=self._start_scan,
-            on_report_click=self._generate_report,
-            on_save_click=self._save_results,
-            on_load_click=self._load_results,
-            on_merge_click=self._merge_scan,
-            on_copy_click=self._copy_distinct,
-            on_pause_click=self._toggle_pause,
-            on_cancel_click=self._cancel_processing
-        )
+        # Controls (now only for extension and checksum configuration)
+        self.control_panel = ControlPanel(top_frame)
         self.control_panel.pack(fill=tk.X, pady=5)
         
         # Status Label
@@ -82,9 +104,9 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("Warning", "Please add at least one folder.")
             return
             
-        ext = self.control_panel.get_extension()
-        if not ext:
-            messagebox.showwarning("Warning", "Please specify a file extension.")
+        extensions = self.control_panel.get_extension()
+        if not extensions:
+            messagebox.showwarning("Warning", "Please specify valid file extension(s). Check the validation message.")
             return
             
         use_checksum = self.control_panel.get_use_checksum()
@@ -100,7 +122,7 @@ class MainWindow(tk.Tk):
         self.animation_panel.start()
         
         # Run in thread
-        thread = threading.Thread(target=self._run_scan_thread, args=(folders, ext, use_checksum))
+        thread = threading.Thread(target=self._run_scan_thread, args=(folders, extensions, use_checksum))
         thread.daemon = True
         thread.start()
         
@@ -112,9 +134,9 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("Warning", "Please add at least one folder to scan.")
             return
             
-        ext = self.control_panel.get_extension()
-        if not ext:
-            messagebox.showwarning("Warning", "Please specify a file extension.")
+        extensions = self.control_panel.get_extension()
+        if not extensions:
+            messagebox.showwarning("Warning", "Please specify valid file extension(s). Check the validation message.")
             return
             
         use_checksum = self.control_panel.get_use_checksum()
@@ -150,18 +172,19 @@ class MainWindow(tk.Tk):
         self.animation_panel.start()
         
         # Run in thread with base_result
-        thread = threading.Thread(target=self._run_scan_thread, args=(folders, ext, use_checksum, base_result))
+        thread = threading.Thread(target=self._run_scan_thread, args=(folders, extensions, use_checksum, base_result))
         thread.daemon = True
         thread.start()
 
     def _run_scan_thread(self, folders, ext, use_checksum, base_result=None):
         try:
             def progress_cb(msg, current, total):
-                self.after(0, lambda: self.status_label.config(text=msg))
+                self.after(0, lambda m=msg: self.status_label.config(text=m))
                 
             def log_cb(msg):
-                self.after(0, lambda: self._log(msg))
-                
+                self.after(0, lambda m=msg: self._log(m))
+
+            self._log(f"Base result {base_result}")
             result = self.scanner_service.scan(
                 folders, 
                 ext, 
@@ -170,37 +193,56 @@ class MainWindow(tk.Tk):
                 log_callback=log_cb,
                 base_result=base_result
             )
+            self._log(f"Scan result {result}")
+
             
-            self.after(0, lambda: self._on_scan_complete(result))
             
         except ImageData.ProcessingCancelled:
             self.after(0, lambda: self.status_label.config(text="Scan Cancelled"))
             self.after(0, lambda: self._log("Scan cancelled by user."))
         except Exception as e:
             self.after(0, lambda: self.status_label.config(text="Error"))
-            self.after(0, lambda: self._log(f"Error: {e}"))
+            self.after(0, lambda err=str(e): self._log(f"Error: {err}"))
             import traceback
             traceback.print_exc()
         finally:
             self.after(0, lambda: self._set_processing(False))
             self.after(0, self.animation_panel.stop)
+            # Fix: Capture result properly in the lambda
+            self.after(0, lambda r=result: self._on_scan_complete(r))
 
     def _on_scan_complete(self, result: ScanResult):
         self.current_scan_result = result
-        self.status_label.config(text=f"Scan Complete. Found {result.duplicate_groups_count} duplicate groups.")
+        self._log(f"Scan complete: {len(result.uniques)} unique items, {len(result.duplicates)} duplicate groups")
+        self.status_label.config(text=f"Scan Complete. Found {result.duplicate_groups_count} duplicate groups, {len(result.uniques)} unique items.")
         self.results_panel.populate(result)
 
     def _set_processing(self, is_processing):
-        self.control_panel.set_processing_state(is_processing)
+        """Enable/disable menu items based on processing state."""
+        state = tk.DISABLED if is_processing else tk.NORMAL
+        ctrl_state = tk.NORMAL if is_processing else tk.DISABLED
+        
+        # Disable/enable action menu items during processing
+        self.actions_menu.entryconfig(0, state=state)  # Scan files
+        self.actions_menu.entryconfig(1, state=state)  # Merge with Result
+        self.actions_menu.entryconfig(2, state=state)  # Generate Report
+        self.actions_menu.entryconfig(3, state=state)  # Archive distinct images
+        
+        # Enable/disable pause and cancel during processing
+        self.actions_menu.entryconfig(5, state=ctrl_state)  # Pause
+        self.actions_menu.entryconfig(6, state=ctrl_state)  # Cancel
+        
+        if not is_processing:
+            self.actions_menu.entryconfig(5, label="Pause")  # Reset pause label
         
     def _toggle_pause(self):
         if self.scanner_service.is_paused():
             self.scanner_service.resume()
-            self.control_panel.set_paused(False)
+            self.actions_menu.entryconfig(5, label="Pause")
             self.status_label.config(text="Resumed...")
         else:
             self.scanner_service.pause()
-            self.control_panel.set_paused(True)
+            self.actions_menu.entryconfig(5, label="Resume")
             self.status_label.config(text="Paused")
 
     def _cancel_processing(self):
